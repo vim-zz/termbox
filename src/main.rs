@@ -16,12 +16,12 @@ fn main() -> anyhow::Result<()> {
     enable_raw_mode()?;
 
     // ── 1. reserve the bottom 3 lines ────────────────────────────────
-    let mut cols_rows = terminal::size()?;              // (cols, rows)
-    set_scroll_region(cols_rows.1)?;
+    let (mut cols, mut rows) = terminal::size()?;
+    set_scroll_region(rows)?;
 
     // ── 2. draw the static box once ──────────────────────────────────
-    draw_frame(&mut out, cols_rows)?;
-    draw_prompt_line(&mut out, "", cols_rows)?;
+    draw_frame(&mut out, (cols, rows))?;
+    draw_prompt_line(&mut out, "", (cols, rows))?;
 
     let mut buf = String::new();
 
@@ -33,10 +33,11 @@ fn main() -> anyhow::Result<()> {
                 // keyboard -------------------------------------------
                 Event::Key(key) => match key.code {
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break, // quit
+                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => break, // quit
                     KeyCode::Esc => break,           // quit
                     KeyCode::Enter => {
                         // Move cursor to the bottom of the scroll region and print
-                        let scroll_region_bottom = cols_rows.1 - 4; // Last line of scroll region (0-indexed)
+                        let scroll_region_bottom = rows - 4; // Last line of scroll region (0-indexed)
                         queue!(
                             out,
                             MoveTo(0, scroll_region_bottom),
@@ -45,27 +46,28 @@ fn main() -> anyhow::Result<()> {
                         )?;
                         out.flush()?;
                         buf.clear();
-                        draw_prompt_line(&mut out, "", cols_rows)?;
+                        draw_prompt_line(&mut out, "", (cols, rows))?;
                     }
                     KeyCode::Backspace => {
                         buf.pop();
-                        draw_prompt_line(&mut out, &buf, cols_rows)?;
+                        draw_prompt_line(&mut out, &buf, (cols, rows))?;
                     }
                     KeyCode::Char(c) => {
                         buf.push(c);
-                        draw_prompt_line(&mut out, &buf, cols_rows)?;
+                        draw_prompt_line(&mut out, &buf, (cols, rows))?;
                     }
                     _ => {}
                 },
 
                 // window resized -------------------------------------
                 Event::Resize(new_cols, new_rows) => {
-                    cols_rows = (new_cols, new_rows);
+                    cols = new_cols;
+                    rows = new_rows;
                     // reset scroll region then set a new one
                     print!("\x1B[r");          // clear any old region
-                    set_scroll_region(cols_rows.1)?;
-                    draw_frame(&mut out, cols_rows)?;
-                    draw_prompt_line(&mut out, &buf, cols_rows)?;
+                    set_scroll_region(rows)?;
+                    draw_frame(&mut out, (cols, rows))?;
+                    draw_prompt_line(&mut out, &buf, (cols, rows))?;
                 }
                 _ => {}
             }
@@ -73,12 +75,26 @@ fn main() -> anyhow::Result<()> {
     }
 
     // ── 4. clean-up ──────────────────────────────────────────────────
-    print!("\x1B[r");           // give terminal its full screen back
+    let clear_line = " ".repeat(cols as usize);
+    queue!(
+        out,
+        MoveTo(0, rows - 3),
+        Print(&clear_line),
+        MoveTo(0, rows - 2),
+        Print(&clear_line),
+        MoveTo(0, rows - 1),
+        Print(&clear_line),
+        MoveTo(0, rows - 0),
+        Print(&clear_line),
+    )?;
+    out.flush()?;
+    // give terminal its full screen back
+    print!("\x1B[r");
     disable_raw_mode()?;
-    
+
     // Position cursor exactly where the input cursor was (at end of current input)
     // Do this AFTER clearing scroll region to prevent cursor position restoration
-    queue!(out, MoveTo((4 + buf.len()) as u16, cols_rows.1 - 2))?;
+    queue!(out, MoveTo((4 + buf.len()) as u16, rows - 2))?;
     out.flush()?;
     Ok(())
 }
