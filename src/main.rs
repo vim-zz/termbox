@@ -7,13 +7,19 @@ use crossterm::{
 };
 use futures::StreamExt;
 use std::io::{Write, stdout};
-use tokio::time::{Duration, interval};
 const LEFT_FRAME_CHARS: usize = const_str::to_char_array!("│ > ").len();
 const RIGHT_FRAME_CHARS: usize = const_str::to_char_array!("│").len();
 
 /// The number of characters used for frame borders and prompt prefix
 /// Format: "│ > " (4 chars) + "│" (1 char) = 5 chars total
 const FRAME_CHARS: usize = LEFT_FRAME_CHARS + RIGHT_FRAME_CHARS;
+
+/// Result of handling a keyboard event
+#[derive(Debug, PartialEq)]
+enum KeyAction {
+    Continue,
+    Exit,
+}
 
 /// Main entry point for the terminal input box application.
 ///
@@ -50,137 +56,33 @@ async fn main() -> anyhow::Result<()> {
     // Create an async event stream
     let mut event_stream = EventStream::new();
 
-    // Create a resize check interval (for smoother resize handling)
-    let mut resize_interval = interval(Duration::from_millis(100));
-
     // ── 3. main loop ─────────────────────────────────────────────────
     loop {
-        tokio::select! {
-            // Handle terminal events
-            maybe_event = event_stream.next() => {
-                match maybe_event {
-                    Some(Ok(event)) => {
-                        match event {
-                // keyboard -------------------------------------------
-                Event::Key(key) => match key.code {
-                    KeyCode::Esc => break, // quit
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break, // quit
-                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => break, // quit
-                    KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
-                        buf.push('\n');
-                        let new_required_lines = calculate_required_lines(&buf, cols);
-                        if new_required_lines != required_lines {
-                            required_lines = new_required_lines;
-                            set_scroll_region(rows, required_lines)?;
-                            draw_frame(&mut out, (cols, rows), required_lines)?;
-                        }
-                        draw_prompt_line(&mut out, &buf, (cols, rows), required_lines)?;
-                    }
-                    // Alternative: Use Ctrl+J for newline (common fallback) so user can use Shift+Enter!
-                    KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        buf.push('\n');
-                        let new_required_lines = calculate_required_lines(&buf, cols);
-                        if new_required_lines != required_lines {
-                            required_lines = new_required_lines;
-                            set_scroll_region(rows, required_lines)?;
-                            draw_frame(&mut out, (cols, rows), required_lines)?;
-                        }
-                        draw_prompt_line(&mut out, &buf, (cols, rows), required_lines)?;
-                    }
-                    KeyCode::Enter => {
-                        // Clear the old frame area first
-                        let old_required_lines = required_lines;
-                        let new_required_lines = calculate_required_lines("", cols);
-
-                        // Clear the old frame area if it was larger
-                        if old_required_lines > new_required_lines {
-                            let clear_line = " ".repeat(cols);
-                            let old_frame_start = rows - old_required_lines;
-                            let new_frame_start = rows - new_required_lines;
-                            // Clear the lines that were part of the old frame but not the new one
-                            for row in old_frame_start..new_frame_start {
-                                queue!(out, MoveTo(0, row as u16), Print(&clear_line))?;
-                            }
-                            out.flush()?;
-                        }
-
-                        // Update the scroll region for the new frame size
-                        if new_required_lines != old_required_lines {
-                            required_lines = new_required_lines;
-                            set_scroll_region(rows, required_lines)?;
-                        }
-
-                        // Now print the text at the bottom of the new scroll region
-                        let scroll_region_bottom = rows - required_lines - 1; // Last line of scroll region (0-based)
-                        queue!(
-                            out,
-                            MoveTo(0, scroll_region_bottom as u16),
-                            Print(&buf),
-                            Print("\r\n") // Carriage return + line feed to scroll properly
-                        )?;
-                        out.flush()?;
-
-                        // Clear buffer and draw the new frame
-                        buf.clear();
-                        draw_frame(&mut out, (cols, rows), required_lines)?;
-                        draw_prompt_line(&mut out, "", (cols, rows), required_lines)?;
-                    }
-                    KeyCode::Backspace => {
-                        buf.pop();
-                        let new_required_lines = calculate_required_lines(&buf, cols);
-                        if new_required_lines != required_lines {
-                            required_lines = new_required_lines;
-                            set_scroll_region(rows, required_lines)?;
-                            draw_frame(&mut out, (cols, rows), required_lines)?;
-                        }
-                        draw_prompt_line(&mut out, &buf, (cols, rows), required_lines)?;
-                    }
-                    KeyCode::Char(c) => {
-                        buf.push(c);
-                        let new_required_lines = calculate_required_lines(&buf, cols);
-                        if new_required_lines != required_lines {
-                            required_lines = new_required_lines;
-                            set_scroll_region(rows, required_lines)?;
-                            draw_frame(&mut out, (cols, rows), required_lines)?;
-                        }
-                        draw_prompt_line(&mut out, &buf, (cols, rows), required_lines)?;
-                    }
-                    _ => {}
-                },
-
-                // window resized -------------------------------------
-                Event::Resize(new_cols, new_rows) => {
-                    cols = new_cols as usize;
-                    rows = new_rows as usize;
-                    required_lines = calculate_required_lines(&buf, cols);
-                    // reset scroll region then set a new one
-                    print!("\x1B[r"); // clear any old region
-                    set_scroll_region(rows, required_lines)?;
-                    draw_frame(&mut out, (cols, rows), required_lines)?;
-                    draw_prompt_line(&mut out, &buf, (cols, rows), required_lines)?;
-                }
-                            _ => {}
-                        }
-                    }
-                    Some(Err(e)) => eprintln!("Error reading event: {}", e),
-                    None => break,
+        match event_stream.next().await {
+            Some(Ok(Event::Key(key))) => {
+                match handle_key_event(key, &mut buf, &mut out, cols, rows, &mut required_lines)
+                    .await?
+                {
+                    KeyAction::Exit => break,
+                    KeyAction::Continue => {}
                 }
             }
 
-            // Periodic terminal size check (backup for resize events)
-            _ = resize_interval.tick() => {
-                if let Ok((new_cols, new_rows)) = terminal::size() {
-                    if new_cols as usize != cols || new_rows as usize != rows {
-                        cols = new_cols as usize;
-                        rows = new_rows as usize;
-                        required_lines = calculate_required_lines(&buf, cols);
-                        print!("\x1B[r");
-                        set_scroll_region(rows, required_lines)?;
-                        draw_frame(&mut out, (cols, rows), required_lines)?;
-                        draw_prompt_line(&mut out, &buf, (cols, rows), required_lines)?;
-                    }
-                }
+            Some(Ok(Event::Resize(new_cols, new_rows))) => {
+                handle_resize(
+                    new_cols as usize,
+                    new_rows as usize,
+                    &buf,
+                    &mut out,
+                    &mut cols,
+                    &mut rows,
+                    &mut required_lines,
+                )?;
             }
+
+            Some(Ok(_)) => {} // Other events
+            Some(Err(e)) => eprintln!("Error reading event: {}", e),
+            None => break,
         }
     }
 
@@ -204,6 +106,139 @@ async fn main() -> anyhow::Result<()> {
     let (cursor_col, cursor_row) = calculate_cursor_position(&buf, cols, rows, required_lines);
     queue!(out, MoveTo(cursor_col as u16, cursor_row as u16))?;
     out.flush()?;
+    Ok(())
+}
+
+/// Handle keyboard events and return the action to take
+async fn handle_key_event(
+    key: crossterm::event::KeyEvent,
+    buf: &mut String,
+    out: &mut std::io::Stdout,
+    cols: usize,
+    rows: usize,
+    required_lines: &mut usize,
+) -> anyhow::Result<KeyAction> {
+    use KeyCode::*;
+
+    match key.code {
+        Esc => return Ok(KeyAction::Exit),
+
+        Char('c') | Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            return Ok(KeyAction::Exit);
+        }
+
+        Enter if key.modifiers.contains(KeyModifiers::ALT) => {
+            buf.push('\n');
+            update_frame_if_needed(buf, out, cols, rows, required_lines)?;
+        }
+
+        Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            buf.push('\n');
+            update_frame_if_needed(buf, out, cols, rows, required_lines)?;
+        }
+
+        Enter => {
+            handle_enter_key(buf, out, cols, rows, required_lines)?;
+        }
+
+        Backspace => {
+            buf.pop();
+            update_frame_if_needed(buf, out, cols, rows, required_lines)?;
+        }
+
+        Char(c) => {
+            buf.push(c);
+            update_frame_if_needed(buf, out, cols, rows, required_lines)?;
+        }
+
+        _ => {}
+    }
+
+    Ok(KeyAction::Continue)
+}
+
+/// Handle the Enter key to submit input
+fn handle_enter_key(
+    buf: &mut String,
+    out: &mut std::io::Stdout,
+    cols: usize,
+    rows: usize,
+    required_lines: &mut usize,
+) -> anyhow::Result<()> {
+    // Clear the old frame area first
+    let old_required_lines = *required_lines;
+    let new_required_lines = calculate_required_lines("", cols);
+
+    // Clear the old frame area if it was larger
+    if old_required_lines > new_required_lines {
+        let clear_line = " ".repeat(cols);
+        let old_frame_start = rows - old_required_lines;
+        let new_frame_start = rows - new_required_lines;
+        for row in old_frame_start..new_frame_start {
+            queue!(out, MoveTo(0, row as u16), Print(&clear_line))?;
+        }
+        out.flush()?;
+    }
+
+    // Update the scroll region for the new frame size
+    if new_required_lines != old_required_lines {
+        *required_lines = new_required_lines;
+        set_scroll_region(rows, *required_lines)?;
+    }
+
+    // Now print the text at the bottom of the new scroll region
+    let scroll_region_bottom = rows - *required_lines - 1;
+    queue!(
+        out,
+        MoveTo(0, scroll_region_bottom as u16),
+        Print(&buf),
+        Print("\r\n")
+    )?;
+    out.flush()?;
+
+    // Clear buffer and draw the new frame
+    buf.clear();
+    draw_frame(out, (cols, rows), *required_lines)?;
+    draw_prompt_line(out, "", (cols, rows), *required_lines)?;
+
+    Ok(())
+}
+
+/// Update frame if needed based on text changes
+fn update_frame_if_needed(
+    buf: &str,
+    out: &mut std::io::Stdout,
+    cols: usize,
+    rows: usize,
+    required_lines: &mut usize,
+) -> anyhow::Result<()> {
+    let new_required_lines = calculate_required_lines(buf, cols);
+    if new_required_lines != *required_lines {
+        *required_lines = new_required_lines;
+        set_scroll_region(rows, *required_lines)?;
+        draw_frame(out, (cols, rows), *required_lines)?;
+    }
+    draw_prompt_line(out, buf, (cols, rows), *required_lines)?;
+    Ok(())
+}
+
+/// Handle terminal resize event
+fn handle_resize(
+    new_cols: usize,
+    new_rows: usize,
+    buf: &str,
+    out: &mut std::io::Stdout,
+    cols: &mut usize,
+    rows: &mut usize,
+    required_lines: &mut usize,
+) -> anyhow::Result<()> {
+    *cols = new_cols;
+    *rows = new_rows;
+    *required_lines = calculate_required_lines(buf, *cols);
+    print!("\x1B[r"); // clear any old region
+    set_scroll_region(*rows, *required_lines)?;
+    draw_frame(out, (*cols, *rows), *required_lines)?;
+    draw_prompt_line(out, buf, (*cols, *rows), *required_lines)?;
     Ok(())
 }
 
