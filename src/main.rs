@@ -8,7 +8,7 @@ use crossterm::{
 use futures::StreamExt;
 use std::io::{Write, stdout};
 use std::sync::{Arc, Mutex};
-use termbox::{tiktok, ui, *};
+use termbox::{commands, ui, *};
 
 /// Main entry point for the terminal input box application.
 ///
@@ -34,6 +34,9 @@ async fn main() -> anyhow::Result<()> {
     let (cols, rows) = terminal::size()?;
     let (cols, rows) = (cols as usize, rows as usize);
     let mut state = InputState::new(cols, rows);
+    
+    // Create command dispatcher
+    let command_dispatcher = commands::CommandDispatcher::new();
 
     // Push existing terminal content up to make space for the input frame
     {
@@ -57,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
     loop {
         match event_stream.next().await {
             Some(Ok(Event::Key(key))) => {
-                match handle_key_event(key, &mut state, out.clone()).await? {
+                match handle_key_event(key, &mut state, out.clone(), &command_dispatcher).await? {
                     KeyAction::Exit => break,
                     KeyAction::Continue => {}
                 }
@@ -110,12 +113,13 @@ async fn handle_key_event(
     key: crossterm::event::KeyEvent,
     state: &mut InputState,
     out: Arc<Mutex<std::io::Stdout>>,
+    command_dispatcher: &commands::CommandDispatcher,
 ) -> anyhow::Result<KeyAction> {
     let action = state.handle_key(key.code, key.modifiers);
 
     match key.code {
         KeyCode::Enter if !key.modifiers.contains(KeyModifiers::ALT) => {
-            handle_enter_key(state, out.clone()).await?;
+            handle_enter_key(state, out.clone(), command_dispatcher).await?;
         }
         _ => {
             update_frame_if_needed(state, out.clone())?;
@@ -129,6 +133,7 @@ async fn handle_key_event(
 async fn handle_enter_key(
     state: &mut InputState,
     out: Arc<Mutex<std::io::Stdout>>,
+    command_dispatcher: &commands::CommandDispatcher,
 ) -> anyhow::Result<()> {
     let submitted_text = state.buffer.clone();
 
@@ -154,9 +159,12 @@ async fn handle_enter_key(
         ui::set_scroll_region(state.rows, state.required_lines)?;
     }
 
-    // Check for special commands (like "tiktok")
-    if let Some(_) = tiktok::handle_tiktok_command(&submitted_text, state, out.clone()).await? {
-        return Ok(());
+    // Check for commands first
+    match command_dispatcher.handle_command(&submitted_text, state, out.clone()).await? {
+        commands::CommandResult::Handled => return Ok(()),
+        commands::CommandResult::NotRecognized => {
+            // Continue with normal text processing
+        }
     }
 
     // Now print the text at the bottom of the new scroll region
