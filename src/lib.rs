@@ -3,6 +3,9 @@ use crossterm::{cursor::MoveTo, queue, style::Print};
 use std::io::Write;
 use tokio::sync::mpsc;
 
+pub mod tiktok;
+pub mod ui;
+
 const LEFT_FRAME_CHARS: usize = const_str::to_char_array!("│ > ").len();
 const RIGHT_FRAME_CHARS: usize = const_str::to_char_array!("│").len();
 
