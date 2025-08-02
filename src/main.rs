@@ -1,14 +1,13 @@
 use crossterm::{
     cursor::MoveTo,
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{Event, EventStream, KeyCode, KeyModifiers},
     queue,
     style::Print,
     terminal::{self, disable_raw_mode, enable_raw_mode},
 };
-use std::{
-    io::{Write, stdout},
-    time::Duration,
-};
+use futures::StreamExt;
+use std::io::{Write, stdout};
+use tokio::time::{Duration, interval};
 const LEFT_FRAME_CHARS: usize = const_str::to_char_array!("│ > ").len();
 const RIGHT_FRAME_CHARS: usize = const_str::to_char_array!("│").len();
 
@@ -31,7 +30,8 @@ const FRAME_CHARS: usize = LEFT_FRAME_CHARS + RIGHT_FRAME_CHARS;
 /// # Returns
 ///
 /// Returns `Ok(())` on successful completion or an error if terminal operations fail.
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let mut out = stdout();
     enable_raw_mode()?;
 
@@ -47,11 +47,20 @@ fn main() -> anyhow::Result<()> {
 
     let mut buf = String::new();
 
+    // Create an async event stream
+    let mut event_stream = EventStream::new();
+
+    // Create a resize check interval (for smoother resize handling)
+    let mut resize_interval = interval(Duration::from_millis(100));
+
     // ── 3. main loop ─────────────────────────────────────────────────
     loop {
-        // poll() lets us handle resize events smoothly
-        if event::poll(Duration::from_millis(100))? {
-            match event::read()? {
+        tokio::select! {
+            // Handle terminal events
+            maybe_event = event_stream.next() => {
+                match maybe_event {
+                    Some(Ok(event)) => {
+                        match event {
                 // keyboard -------------------------------------------
                 Event::Key(key) => match key.code {
                     KeyCode::Esc => break, // quit
@@ -150,7 +159,27 @@ fn main() -> anyhow::Result<()> {
                     draw_frame(&mut out, (cols, rows), required_lines)?;
                     draw_prompt_line(&mut out, &buf, (cols, rows), required_lines)?;
                 }
-                _ => {}
+                            _ => {}
+                        }
+                    }
+                    Some(Err(e)) => eprintln!("Error reading event: {}", e),
+                    None => break,
+                }
+            }
+
+            // Periodic terminal size check (backup for resize events)
+            _ = resize_interval.tick() => {
+                if let Ok((new_cols, new_rows)) = terminal::size() {
+                    if new_cols as usize != cols || new_rows as usize != rows {
+                        cols = new_cols as usize;
+                        rows = new_rows as usize;
+                        required_lines = calculate_required_lines(&buf, cols);
+                        print!("\x1B[r");
+                        set_scroll_region(rows, required_lines)?;
+                        draw_frame(&mut out, (cols, rows), required_lines)?;
+                        draw_prompt_line(&mut out, &buf, (cols, rows), required_lines)?;
+                    }
+                }
             }
         }
     }
