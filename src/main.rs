@@ -1,3 +1,4 @@
+
 use crossterm::{
     cursor::MoveTo,
     event::{Event, EventStream, KeyCode, KeyModifiers},
@@ -6,20 +7,10 @@ use crossterm::{
     terminal::{self, disable_raw_mode, enable_raw_mode},
 };
 use futures::StreamExt;
+use termbox::*;
 use std::io::{Write, stdout};
-const LEFT_FRAME_CHARS: usize = const_str::to_char_array!("│ > ").len();
-const RIGHT_FRAME_CHARS: usize = const_str::to_char_array!("│").len();
-
-/// The number of characters used for frame borders and prompt prefix
-/// Format: "│ > " (4 chars) + "│" (1 char) = 5 chars total
-const FRAME_CHARS: usize = LEFT_FRAME_CHARS + RIGHT_FRAME_CHARS;
-
-/// Result of handling a keyboard event
-#[derive(Debug, PartialEq)]
-enum KeyAction {
-    Continue,
-    Exit,
-}
+use std::sync::{Arc, Mutex};
+use tokio::time::{sleep, Duration};
 
 /// Pushes existing terminal content up by inserting newlines to make space for the input frame.
 ///
@@ -44,6 +35,73 @@ fn push_content_up(out: &mut std::io::Stdout, required_lines: usize) -> anyhow::
     Ok(())
 }
 
+
+/// Runs the tiktok progress animation from 1 to 10 with 0.5s steps.
+///
+/// This function creates a single progress box that behaves like normal scrollable
+/// terminal content. It prints the initial box, then updates it in place by moving
+/// the cursor back to the progress line.
+///
+/// # Arguments
+///
+/// * `out` - Shared stdout handle
+/// * `cols` - Terminal width in columns
+/// * `rows` - Terminal height in rows
+/// * `required_lines` - Number of lines used by the input frame
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success or an error if the operation fails.
+async fn run_tiktok_progress(
+    out: Arc<Mutex<std::io::Stdout>>,
+    cols: usize,
+    rows: usize,
+    required_lines: usize,
+) -> anyhow::Result<()> {
+    let scroll_region_bottom = rows - required_lines - 1;
+    
+    // Print initial progress box (progress = 1) to scroll region
+    let initial_progress = "[█░░░░░░░░░] 1/10";
+    let box_width = initial_progress.len() + 4;
+    let box_left = (cols - box_width) / 2;
+    
+    {
+        let mut out_guard = out.lock().unwrap();
+        queue!(
+            out_guard,
+            MoveTo(0, scroll_region_bottom as u16),
+            Print(format!("╭{}╮\r\n", "─".repeat(box_width - 2))),
+            Print(format!("│ {} │\r\n", initial_progress)),
+            Print(format!("╰{}╯\r\n", "─".repeat(box_width - 2)))
+        )?;
+        out_guard.flush()?;
+    }
+    
+    sleep(Duration::from_millis(500)).await;
+    
+    // Update progress from 2 to 10 by moving cursor back to the progress line
+    for progress in 2..=10 {
+        let filled_chars = "█".repeat(progress);
+        let empty_chars = "░".repeat(10 - progress);
+        let progress_bar = format!("[{}{}] {}/10", filled_chars, empty_chars, progress);
+        
+        {
+            let mut out_guard = out.lock().unwrap();
+            // Move cursor up 2 lines to the progress bar line, then update it
+            queue!(
+                out_guard,
+                MoveTo(box_left as u16, (scroll_region_bottom + 1) as u16),
+                Print(format!("│ {} │", progress_bar))
+            )?;
+            out_guard.flush()?;
+        }
+        
+        sleep(Duration::from_millis(500)).await;
+    }
+    
+    Ok(())
+}
+
 /// Main entry point for the terminal input box application.
 ///
 /// Sets up a terminal-based input interface with the following features:
@@ -61,24 +119,28 @@ fn push_content_up(out: &mut std::io::Stdout, required_lines: usize) -> anyhow::
 /// Returns `Ok(())` on successful completion or an error if terminal operations fail.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut out = stdout();
+    let out = Arc::new(Mutex::new(stdout()));
     enable_raw_mode()?;
 
     // ── 1. reserve the bottom lines ──────────────────────────────────
     let (cols, rows) = terminal::size()?;
-    let (mut cols, mut rows) = (cols as usize, rows as usize);
-    let mut required_lines = calculate_required_lines("", cols);
+    let (cols, rows) = (cols as usize, rows as usize);
+    let mut state = InputState::new(cols, rows);
     
     // Push existing terminal content up to make space for the input frame
-    push_content_up(&mut out, required_lines)?;
+    {
+        let mut out_guard = out.lock().unwrap();
+        push_content_up(&mut out_guard, state.required_lines)?;
+    }
     
-    set_scroll_region(rows, required_lines)?;
+    set_scroll_region(rows, state.required_lines)?;
 
     // ── 2. draw the static box once ──────────────────────────────────
-    draw_frame(&mut out, (cols, rows), required_lines)?;
-    draw_prompt_line(&mut out, "", (cols, rows), required_lines)?;
-
-    let mut buf = String::new();
+    {
+        let mut out_guard = out.lock().unwrap();
+        draw_frame(&mut out_guard, (cols, rows), state.required_lines)?;
+        draw_prompt_line(&mut out_guard, "", (cols, rows), state.required_lines)?;
+    }
 
     // Create an async event stream
     let mut event_stream = EventStream::new();
@@ -87,9 +149,7 @@ async fn main() -> anyhow::Result<()> {
     loop {
         match event_stream.next().await {
             Some(Ok(Event::Key(key))) => {
-                match handle_key_event(key, &mut buf, &mut out, cols, rows, &mut required_lines)
-                    .await?
-                {
+                match handle_key_event(key, &mut state, out.clone()).await? {
                     KeyAction::Exit => break,
                     KeyAction::Continue => {}
                 }
@@ -99,11 +159,8 @@ async fn main() -> anyhow::Result<()> {
                 handle_resize(
                     new_cols as usize,
                     new_rows as usize,
-                    &buf,
-                    &mut out,
-                    &mut cols,
-                    &mut rows,
-                    &mut required_lines,
+                    &mut state,
+                    out.clone(),
                 )?;
             }
 
@@ -114,141 +171,145 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── 4. clean-up ──────────────────────────────────────────────────
-    let clear_line = " ".repeat(cols);
-    // Clear all lines used by the frame
-    for i in 0..=required_lines {
-        queue!(
-            out,
-            MoveTo(0 as u16, (rows - required_lines - 1 + i) as u16),
-            Print(&clear_line)
-        )?;
-    }
-    out.flush()?;
-    // give terminal its full screen back
-    print!("\x1B[r");
-    disable_raw_mode()?;
+    {
+        let mut out_guard = out.lock().unwrap();
+        let clear_line = " ".repeat(state.cols);
+        // Clear all lines used by the frame
+        for i in 0..=state.required_lines {
+            queue!(
+                out_guard,
+                MoveTo(0 as u16, (state.rows - state.required_lines - 1 + i) as u16),
+                Print(&clear_line)
+            )?;
+        }
+        out_guard.flush()?;
+        // give terminal its full screen back
+        print!("\x1B[r");
+        disable_raw_mode()?;
 
-    // Position cursor exactly where the input cursor was (at end of current input)
-    // Do this AFTER clearing scroll region to prevent cursor position restoration
-    let (cursor_col, cursor_row) = calculate_cursor_position(&buf, cols, rows, required_lines);
-    queue!(out, MoveTo(cursor_col as u16, cursor_row as u16))?;
-    out.flush()?;
+        // Position cursor exactly where the input cursor was (at end of current input)
+        // Do this AFTER clearing scroll region to prevent cursor position restoration
+        let (cursor_col, cursor_row) = calculate_cursor_position(&state.buffer, state.cols, state.rows, state.required_lines);
+        queue!(out_guard, MoveTo(cursor_col as u16, cursor_row as u16))?;
+        out_guard.flush()?;
+    }
     Ok(())
 }
 
 /// Handle keyboard events and return the action to take
 async fn handle_key_event(
     key: crossterm::event::KeyEvent,
-    buf: &mut String,
-    out: &mut std::io::Stdout,
-    cols: usize,
-    rows: usize,
-    required_lines: &mut usize,
+    state: &mut InputState,
+    out: Arc<Mutex<std::io::Stdout>>,
 ) -> anyhow::Result<KeyAction> {
-    use KeyCode::*;
-
+    let action = state.handle_key(key.code, key.modifiers);
+    
     match key.code {
-        Esc => return Ok(KeyAction::Exit),
-
-        Char('c') | Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            return Ok(KeyAction::Exit);
+        KeyCode::Enter if !key.modifiers.contains(KeyModifiers::ALT) => {
+            handle_enter_key(state, out.clone()).await?;
         }
-
-        Enter if key.modifiers.contains(KeyModifiers::ALT) => {
-            buf.push('\n');
-            update_frame_if_needed(buf, out, cols, rows, required_lines)?;
+        _ => {
+            update_frame_if_needed(state, out.clone())?;
         }
-
-        Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            buf.push('\n');
-            update_frame_if_needed(buf, out, cols, rows, required_lines)?;
-        }
-
-        Enter => {
-            handle_enter_key(buf, out, cols, rows, required_lines)?;
-        }
-
-        Backspace => {
-            buf.pop();
-            update_frame_if_needed(buf, out, cols, rows, required_lines)?;
-        }
-
-        Char(c) => {
-            buf.push(c);
-            update_frame_if_needed(buf, out, cols, rows, required_lines)?;
-        }
-
-        _ => {}
     }
 
-    Ok(KeyAction::Continue)
+    Ok(action)
 }
 
 /// Handle the Enter key to submit input
-fn handle_enter_key(
-    buf: &mut String,
-    out: &mut std::io::Stdout,
-    cols: usize,
-    rows: usize,
-    required_lines: &mut usize,
+async fn handle_enter_key(
+    state: &mut InputState,
+    out: Arc<Mutex<std::io::Stdout>>,
 ) -> anyhow::Result<()> {
+    let submitted_text = state.buffer.clone();
+    
     // Clear the old frame area first
-    let old_required_lines = *required_lines;
-    let new_required_lines = calculate_required_lines("", cols);
+    let old_required_lines = state.required_lines;
+    let new_required_lines = calculate_required_lines("", state.cols);
 
     // Clear the old frame area if it was larger
     if old_required_lines > new_required_lines {
-        let clear_line = " ".repeat(cols);
-        let old_frame_start = rows - old_required_lines;
-        let new_frame_start = rows - new_required_lines;
+        let mut out_guard = out.lock().unwrap();
+        let clear_line = " ".repeat(state.cols);
+        let old_frame_start = state.rows - old_required_lines;
+        let new_frame_start = state.rows - new_required_lines;
         for row in old_frame_start..new_frame_start {
-            queue!(out, MoveTo(0, row as u16), Print(&clear_line))?;
+            queue!(out_guard, MoveTo(0, row as u16), Print(&clear_line))?;
         }
-        out.flush()?;
+        out_guard.flush()?;
     }
 
     // Update the scroll region for the new frame size
     if new_required_lines != old_required_lines {
-        *required_lines = new_required_lines;
-        set_scroll_region(rows, *required_lines)?;
+        state.required_lines = new_required_lines;
+        set_scroll_region(state.rows, state.required_lines)?;
+    }
+
+    // Check for special command "tiktok"
+    if submitted_text.trim() == "tiktok" {
+        // Spawn the tiktok progress animation as a background task
+        let out_clone = out.clone();
+        let required_lines_copy = state.required_lines;
+        let cols_copy = state.cols;
+        let rows_copy = state.rows;
+        tokio::spawn(async move {
+            if let Err(e) = run_tiktok_progress(out_clone, cols_copy, rows_copy, required_lines_copy).await {
+                eprintln!("Error running tiktok progress: {}", e);
+            }
+        });
+        
+        // Clear buffer and redraw frame immediately (don't wait for animation)
+        state.buffer.clear();
+        state.required_lines = calculate_required_lines("", state.cols);
+        {
+            let mut out_guard = out.lock().unwrap();
+            draw_frame(&mut out_guard, (state.cols, state.rows), state.required_lines)?;
+            draw_prompt_line(&mut out_guard, "", (state.cols, state.rows), state.required_lines)?;
+        }
+        return Ok(());
     }
 
     // Now print the text at the bottom of the new scroll region
-    let scroll_region_bottom = rows - *required_lines - 1;
+    let scroll_region_bottom = state.rows - state.required_lines - 1;
 
     // Replace all \n with \r\n to ensure cursor returns to column 0
-    let output_text = buf.replace('\n', "\r\n");
-    queue!(
-        out,
-        MoveTo(0, scroll_region_bottom as u16),
-        Print(&output_text),
-        Print("\r\n") // Final newline to scroll properly
-    )?;
-    out.flush()?;
+    let output_text = submitted_text.replace('\n', "\r\n");
+    {
+        let mut out_guard = out.lock().unwrap();
+        queue!(
+            out_guard,
+            MoveTo(0, scroll_region_bottom as u16),
+            Print(&output_text),
+            Print("\r\n") // Final newline to scroll properly
+        )?;
+        out_guard.flush()?;
 
-    // Clear buffer and draw the new frame
-    buf.clear();
-    draw_frame(out, (cols, rows), *required_lines)?;
-    draw_prompt_line(out, "", (cols, rows), *required_lines)?;
+        // Clear buffer and draw the new frame
+        state.buffer.clear();
+        state.required_lines = calculate_required_lines("", state.cols);
+        draw_frame(&mut out_guard, (state.cols, state.rows), state.required_lines)?;
+        draw_prompt_line(&mut out_guard, "", (state.cols, state.rows), state.required_lines)?;
+    }
 
     Ok(())
 }
 
 /// Update frame if needed based on text changes
 fn update_frame_if_needed(
-    buf: &str,
-    out: &mut std::io::Stdout,
-    cols: usize,
-    rows: usize,
-    required_lines: &mut usize,
+    state: &mut InputState,
+    out: Arc<Mutex<std::io::Stdout>>,
 ) -> anyhow::Result<()> {
-    let new_required_lines = calculate_required_lines(buf, cols);
-    if new_required_lines != *required_lines {
-        *required_lines = new_required_lines;
-        set_scroll_region(rows, *required_lines)?;
-        draw_frame(out, (cols, rows), *required_lines)?;
+    let new_required_lines = calculate_required_lines(&state.buffer, state.cols);
+    if new_required_lines != state.required_lines {
+        state.required_lines = new_required_lines;
+        set_scroll_region(state.rows, state.required_lines)?;
+        let mut out_guard = out.lock().unwrap();
+        draw_frame(&mut out_guard, (state.cols, state.rows), state.required_lines)?;
+        draw_prompt_line(&mut out_guard, &state.buffer, (state.cols, state.rows), state.required_lines)?;
+    } else {
+        let mut out_guard = out.lock().unwrap();
+        draw_prompt_line(&mut out_guard, &state.buffer, (state.cols, state.rows), state.required_lines)?;
     }
-    draw_prompt_line(out, buf, (cols, rows), *required_lines)?;
     Ok(())
 }
 
@@ -256,104 +317,18 @@ fn update_frame_if_needed(
 fn handle_resize(
     new_cols: usize,
     new_rows: usize,
-    buf: &str,
-    out: &mut std::io::Stdout,
-    cols: &mut usize,
-    rows: &mut usize,
-    required_lines: &mut usize,
+    state: &mut InputState,
+    out: Arc<Mutex<std::io::Stdout>>,
 ) -> anyhow::Result<()> {
-    *cols = new_cols;
-    *rows = new_rows;
-    *required_lines = calculate_required_lines(buf, *cols);
+    state.handle_resize(new_cols, new_rows);
     print!("\x1B[r"); // clear any old region
-    set_scroll_region(*rows, *required_lines)?;
-    draw_frame(out, (*cols, *rows), *required_lines)?;
-    draw_prompt_line(out, buf, (*cols, *rows), *required_lines)?;
+    set_scroll_region(state.rows, state.required_lines)?;
+    let mut out_guard = out.lock().unwrap();
+    draw_frame(&mut out_guard, (state.cols, state.rows), state.required_lines)?;
+    draw_prompt_line(&mut out_guard, &state.buffer, (state.cols, state.rows), state.required_lines)?;
     Ok(())
 }
 
-/// Calculates the number of terminal lines required to display the input box.
-///
-/// This function determines how many lines are needed for the complete input box,
-/// including the top border, text content (which may wrap across multiple lines),
-/// and bottom border. The minimum is always 3 lines (empty input with borders).
-///
-/// # Arguments
-///
-/// * `text` - The current input text to measure
-/// * `cols` - The terminal width in columns
-///
-/// # Returns
-///
-/// The total number of lines needed for the input box frame and content.
-fn calculate_required_lines(text: &str, cols: usize) -> usize {
-    if text.is_empty() {
-        return 3; // minimum: top border, input line, bottom border
-    }
-    let inner_width = cols - FRAME_CHARS;
-
-    // Split text by newlines and calculate wrapped lines for each segment
-    let mut total_lines = 0;
-    for line in text.split('\n') {
-        if line.is_empty() {
-            total_lines += 1; // Empty lines still take up space
-        } else {
-            let wrapped_lines = (line.len() + inner_width - 1) / inner_width;
-            total_lines += wrapped_lines.max(1);
-        }
-    }
-
-    total_lines + 2 // add top and bottom borders
-}
-
-/// Calculates the exact cursor position for the current text input.
-///
-/// This function determines where the cursor should be positioned based on the
-/// current text length, accounting for text wrapping within the input box.
-/// The position is calculated relative to the input box boundaries.
-///
-/// # Arguments
-///
-/// * `text` - The current input text
-/// * `cols` - The terminal width in columns
-/// * `rows` - The terminal height in rows
-/// * `required_lines` - The number of lines the input box occupies
-///
-/// # Returns
-///
-/// A tuple `(column, row)` representing the cursor position in terminal coordinates.
-fn calculate_cursor_position(
-    text: &str,
-    cols: usize,
-    rows: usize,
-    required_lines: usize,
-) -> (usize, usize) {
-    let inner_width = cols - FRAME_CHARS;
-
-    // Split text into display lines, same as draw_prompt_line
-    let mut lines = Vec::new();
-
-    for text_line in text.split('\n') {
-        if text_line.is_empty() {
-            lines.push(""); // Empty lines from newlines
-        } else {
-            // Handle wrapping for this line segment
-            let mut current_pos = 0;
-            while current_pos < text_line.len() {
-                let end_pos = (current_pos + inner_width).min(text_line.len());
-                lines.push(&text_line[current_pos..end_pos]);
-                current_pos = end_pos;
-            }
-        }
-    }
-
-    // Cursor is at the end of the last line
-    let last_line = lines.last().unwrap();
-    let cursor_row = rows - required_lines + 1 + lines.len() - 1;
-    let cursor_col = 4 + last_line.len(); // "│ > " = 4 chars + length of last line
-
-    (cursor_col, cursor_row)
-}
 
 /// Sets up a terminal scroll region to keep the input box fixed at the bottom.
 ///
