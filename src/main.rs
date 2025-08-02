@@ -188,11 +188,14 @@ fn handle_enter_key(
 
     // Now print the text at the bottom of the new scroll region
     let scroll_region_bottom = rows - *required_lines - 1;
+
+    // Replace all \n with \r\n to ensure cursor returns to column 0
+    let output_text = buf.replace('\n', "\r\n");
     queue!(
         out,
         MoveTo(0, scroll_region_bottom as u16),
-        Print(&buf),
-        Print("\r\n")
+        Print(&output_text),
+        Print("\r\n") // Final newline to scroll properly
     )?;
     out.flush()?;
 
