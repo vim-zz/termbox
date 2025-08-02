@@ -1,5 +1,4 @@
 use std::sync::{Arc, Mutex};
-use async_trait::async_trait;
 
 use crate::InputState;
 
@@ -14,67 +13,71 @@ pub enum CommandResult {
     NotRecognized,
 }
 
-/// Trait for command handlers
-#[async_trait]
-pub trait CommandHandler: Send + Sync {
-    /// Handle a command and return whether it was processed
-    async fn handle(
+/// All available commands
+#[derive(Debug)]
+pub enum Command {
+    TikTok,
+    // Future commands can be added here
+}
+
+impl Command {
+    /// Parse a command from input string
+    pub fn from_input(input: &str) -> Option<Self> {
+        match input.trim() {
+            "tiktok" => Some(Command::TikTok),
+            _ => None,
+        }
+    }
+
+    /// Get the command names this enum variant responds to
+    pub fn command_names(&self) -> &[&str] {
+        match self {
+            Command::TikTok => &["tiktok"],
+        }
+    }
+
+    /// Handle the command execution
+    pub async fn handle(
         &self,
-        input: &str,
+        _input: &str,
         state: &mut InputState,
         out: Arc<Mutex<std::io::Stdout>>,
-    ) -> anyhow::Result<CommandResult>;
-
-    /// Get the command name(s) this handler responds to
-    fn command_names(&self) -> &[&str];
+    ) -> anyhow::Result<CommandResult> {
+        match self {
+            Command::TikTok => {
+                tiktok::handle_tiktok_command(state, out).await?;
+                Ok(CommandResult::Handled)
+            }
+        }
+    }
 }
 
 /// Central command dispatcher that manages all available commands
-pub struct CommandDispatcher {
-    handlers: Vec<Box<dyn CommandHandler>>,
-}
+pub struct CommandDispatcher;
 
 impl CommandDispatcher {
-    /// Create a new command dispatcher with all available command handlers
+    /// Create a new command dispatcher
     pub fn new() -> Self {
-        let mut dispatcher = Self {
-            handlers: Vec::new(),
-        };
-        
-        // Register all command handlers
-        dispatcher.register_handler(Box::new(tiktok::TikTokCommand));
-        
-        dispatcher
+        Self
     }
-    
-    /// Register a new command handler
-    pub fn register_handler(&mut self, handler: Box<dyn CommandHandler>) {
-        self.handlers.push(handler);
-    }
-    
-    /// Process a command by checking all registered handlers
+
+    /// Process a command by checking all available commands
     pub async fn handle_command(
         &self,
         input: &str,
         state: &mut InputState,
         out: Arc<Mutex<std::io::Stdout>>,
     ) -> anyhow::Result<CommandResult> {
-        for handler in &self.handlers {
-            match handler.handle(input, state, out.clone()).await? {
-                CommandResult::Handled => return Ok(CommandResult::Handled),
-                CommandResult::NotRecognized => continue,
-            }
+        if let Some(command) = Command::from_input(input) {
+            command.handle(input, state, out).await
+        } else {
+            Ok(CommandResult::NotRecognized)
         }
-        
-        Ok(CommandResult::NotRecognized)
     }
-    
+
     /// Get a list of all available commands
     pub fn list_commands(&self) -> Vec<&str> {
-        self.handlers
-            .iter()
-            .flat_map(|handler| handler.command_names().iter().copied())
-            .collect()
+        vec!["tiktok"] // Can be generated from Command enum in the future
     }
 }
 

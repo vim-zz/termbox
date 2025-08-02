@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
     let (cols, rows) = terminal::size()?;
     let (cols, rows) = (cols as usize, rows as usize);
     let mut state = InputState::new(cols, rows);
-    
+
     // Create command dispatcher
     let command_dispatcher = commands::CommandDispatcher::new();
 
@@ -160,7 +160,10 @@ async fn handle_enter_key(
     }
 
     // Check for commands first
-    match command_dispatcher.handle_command(&submitted_text, state, out.clone()).await? {
+    match command_dispatcher
+        .handle_command(&submitted_text, state, out.clone())
+        .await?
+    {
         commands::CommandResult::Handled => return Ok(()),
         commands::CommandResult::NotRecognized => {
             // Continue with normal text processing
