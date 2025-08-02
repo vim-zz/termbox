@@ -21,6 +21,29 @@ enum KeyAction {
     Exit,
 }
 
+/// Pushes existing terminal content up by inserting newlines to make space for the input frame.
+///
+/// This function ensures that any existing content in the terminal is scrolled up
+/// by the required number of lines before the input box is drawn, preventing the
+/// frame from overwriting existing content.
+///
+/// # Arguments
+///
+/// * `out` - Mutable reference to stdout for writing output
+/// * `required_lines` - The number of lines to push the content up by
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success or an error if the operation fails.
+fn push_content_up(out: &mut std::io::Stdout, required_lines: usize) -> anyhow::Result<()> {
+    // Insert newlines to push existing content up
+    for _ in 0..required_lines {
+        queue!(out, Print("\n"))?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
 /// Main entry point for the terminal input box application.
 ///
 /// Sets up a terminal-based input interface with the following features:
@@ -45,6 +68,10 @@ async fn main() -> anyhow::Result<()> {
     let (cols, rows) = terminal::size()?;
     let (mut cols, mut rows) = (cols as usize, rows as usize);
     let mut required_lines = calculate_required_lines("", cols);
+    
+    // Push existing terminal content up to make space for the input frame
+    push_content_up(&mut out, required_lines)?;
+    
     set_scroll_region(rows, required_lines)?;
 
     // ── 2. draw the static box once ──────────────────────────────────
