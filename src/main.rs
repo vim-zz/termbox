@@ -79,7 +79,29 @@ fn main() -> anyhow::Result<()> {
                         draw_prompt_line(&mut out, &buf, (cols, rows), required_lines)?;
                     }
                     KeyCode::Enter => {
-                        // Move cursor to the bottom of the scroll region and print
+                        // Clear the old frame area first
+                        let old_required_lines = required_lines;
+                        let new_required_lines = calculate_required_lines("", cols);
+
+                        // Clear the old frame area if it was larger
+                        if old_required_lines > new_required_lines {
+                            let clear_line = " ".repeat(cols);
+                            let old_frame_start = rows - old_required_lines;
+                            let new_frame_start = rows - new_required_lines;
+                            // Clear the lines that were part of the old frame but not the new one
+                            for row in old_frame_start..new_frame_start {
+                                queue!(out, MoveTo(0, row as u16), Print(&clear_line))?;
+                            }
+                            out.flush()?;
+                        }
+
+                        // Update the scroll region for the new frame size
+                        if new_required_lines != old_required_lines {
+                            required_lines = new_required_lines;
+                            set_scroll_region(rows, required_lines)?;
+                        }
+
+                        // Now print the text at the bottom of the new scroll region
                         let scroll_region_bottom = rows - required_lines - 1; // Last line of scroll region (0-based)
                         queue!(
                             out,
@@ -88,12 +110,10 @@ fn main() -> anyhow::Result<()> {
                             Print("\r\n") // Carriage return + line feed to scroll properly
                         )?;
                         out.flush()?;
+
+                        // Clear buffer and draw the new frame
                         buf.clear();
-                        let new_required_lines = calculate_required_lines("", cols);
-                        if new_required_lines != required_lines {
-                            required_lines = new_required_lines;
-                            set_scroll_region(rows, required_lines)?;
-                        }
+                        draw_frame(&mut out, (cols, rows), required_lines)?;
                         draw_prompt_line(&mut out, "", (cols, rows), required_lines)?;
                     }
                     KeyCode::Backspace => {
