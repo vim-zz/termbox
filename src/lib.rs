@@ -1,9 +1,17 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::{cursor::MoveTo, queue, style::Print};
 use std::io::Write;
+use tokio::sync::mpsc;
 
 const LEFT_FRAME_CHARS: usize = const_str::to_char_array!("│ > ").len();
 const RIGHT_FRAME_CHARS: usize = const_str::to_char_array!("│").len();
+
+/// Represents scroll events that can occur in the terminal
+#[derive(Debug, Clone)]
+pub enum ScrollEvent {
+    /// Terminal content scrolled up by N lines
+    ScrolledUp(usize),
+}
 
 /// The number of characters used for frame borders and prompt prefix
 /// Format: "│ > " (4 chars) + "│" (1 char) = 5 chars total
@@ -17,12 +25,13 @@ pub enum KeyAction {
 }
 
 /// State of the input application
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct InputState {
     pub buffer: String,
     pub cols: usize,
     pub rows: usize,
     pub required_lines: usize,
+    pub active_scroll_sender: Option<mpsc::Sender<ScrollEvent>>,
 }
 
 impl InputState {
@@ -33,6 +42,7 @@ impl InputState {
             cols,
             rows,
             required_lines,
+            active_scroll_sender: None,
         }
     }
 
@@ -96,6 +106,10 @@ impl InputState {
             self.update_required_lines();
             Some(result)
         }
+    }
+    
+    pub fn clear_scroll_sender(&mut self) {
+        self.active_scroll_sender = None;
     }
 }
 
