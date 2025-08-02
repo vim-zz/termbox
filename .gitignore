@@ -1,1 +1,5 @@
+# Dont keep build artifacts
 /target
+
+# Dont keep logs
+*.log
