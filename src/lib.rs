@@ -50,7 +50,9 @@ impl InputState {
         match key_code {
             KeyCode::Esc => KeyAction::Exit,
 
-            KeyCode::Char('c') | KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('c') | KeyCode::Char('d')
+                if modifiers.contains(KeyModifiers::CONTROL) =>
+            {
                 KeyAction::Exit
             }
 
@@ -107,7 +109,7 @@ impl InputState {
             Some(result)
         }
     }
-    
+
     pub fn clear_scroll_sender(&mut self) {
         self.active_scroll_sender = None;
     }
@@ -348,7 +350,7 @@ pub fn draw_prompt_line_to_buffer<W: Write>(
 /// Captures terminal drawing operations as a string for testing
 pub fn capture_terminal_drawing(
     _state: &InputState,
-    draw_fn: impl FnOnce(&mut std::io::Cursor<Vec<u8>>) -> anyhow::Result<()>
+    draw_fn: impl FnOnce(&mut std::io::Cursor<Vec<u8>>) -> anyhow::Result<()>,
 ) -> anyhow::Result<String> {
     let mut buffer = std::io::Cursor::new(Vec::new());
     draw_fn(&mut buffer)?;

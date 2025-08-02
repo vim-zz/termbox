@@ -34,7 +34,7 @@ cargo fmt --check
 
 ## Architecture
 
-The application is a single-file Rust program (`src/main.rs`) that implements a terminal UI with the following key components:
+The application is structured as a Rust library (`src/lib.rs`) with the main application (`src/main.rs`) that implements a terminal UI with the following key components:
 
 1. **Terminal Setup**: Uses crossterm to enable raw mode and handle terminal events
 2. **Scroll Region Management**: Implements DECSTBM escape sequences to create a fixed input area at the bottom while allowing the rest of the terminal to scroll
@@ -42,12 +42,18 @@ The application is a single-file Rust program (`src/main.rs`) that implements a 
 4. **Multi-line Input**: Supports Alt+Enter or Ctrl+J for inserting newlines within the input
 5. **Proper Cleanup**: Ensures terminal state is restored on exit
 
-Key functions:
-- `main()`: Event loop handling keyboard input and terminal resize events
-- `calculate_required_lines()`: Determines frame height based on text content
-- `set_scroll_region()`: Configures terminal scroll boundaries
-- `draw_frame()`: Renders the box borders using Unicode characters
-- `draw_prompt_line()`: Renders the input text with word wrapping
+### Core Library (`src/lib.rs`)
+- `InputState`: Main state management struct with key handling and resize logic
+- `calculate_required_lines()`: Determines frame height based on text content and terminal width
+- `calculate_cursor_position()`: Calculates exact cursor placement for text input
+- `render_text_lines()`: Creates string representation for testing
+- Drawing functions: `draw_frame_to_buffer()`, `draw_prompt_line_to_buffer()` for terminal output
+
+### Main Application (`src/main.rs`) 
+- Async event loop using tokio and crossterm's EventStream
+- `push_content_up()`: Pushes existing terminal content up before drawing input frame
+- Progress animation functionality with tiktok-style progress bars
+- Terminal setup, cleanup, and scroll region management
 
 ## Input Controls
 
@@ -55,3 +61,12 @@ Key functions:
 - **Alt+Enter** or **Ctrl+J**: Insert a newline for multi-line input
 - **Backspace**: Delete the last character
 - **Esc**, **Ctrl+C**, or **Ctrl+D**: Exit the application
+
+## Testing
+
+The project includes comprehensive unit tests in the `tests/` directory:
+
+- `tests/input_tests.rs`: Tests for input handling, key events, and state management
+- `tests/output_tests.rs`: Tests for terminal output rendering and display logic
+
+Run tests with standard Rust testing commands. Tests use the library's public API to verify input handling, text wrapping, cursor positioning, and frame calculation logic.

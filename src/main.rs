@@ -1,4 +1,3 @@
-
 use crossterm::{
     cursor::MoveTo,
     event::{Event, EventStream, KeyCode, KeyModifiers},
@@ -7,11 +6,11 @@ use crossterm::{
     terminal::{self, disable_raw_mode, enable_raw_mode},
 };
 use futures::StreamExt;
-use termbox::*;
 use std::io::{Write, stdout};
 use std::sync::{Arc, Mutex};
+use termbox::*;
 use tokio::sync::mpsc;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 /// Main entry point for the terminal input box application.
 ///
@@ -100,13 +99,13 @@ async fn main() -> anyhow::Result<()> {
 
         // Position cursor exactly where the input cursor was (at end of current input)
         // Do this AFTER clearing scroll region to prevent cursor position restoration
-        let (cursor_col, cursor_row) = calculate_cursor_position(&state.buffer, state.cols, state.rows, state.required_lines);
+        let (cursor_col, cursor_row) =
+            calculate_cursor_position(&state.buffer, state.cols, state.rows, state.required_lines);
         queue!(out_guard, MoveTo(cursor_col as u16, cursor_row as u16))?;
         out_guard.flush()?;
     }
     Ok(())
 }
-
 
 /// Pushes existing terminal content up by inserting newlines to make space for the input frame.
 ///
@@ -130,7 +129,6 @@ fn push_content_up(out: &mut std::io::Stdout, required_lines: usize) -> anyhow::
     out.flush()?;
     Ok(())
 }
-
 
 /// Runs the tiktok progress animation from 1 to 10 with 0.5s steps.
 ///
@@ -157,34 +155,36 @@ async fn run_tiktok_progress(
     mut scroll_rx: mpsc::Receiver<ScrollEvent>,
 ) -> anyhow::Result<()> {
     let scroll_region_bottom = rows - required_lines - 1;
-    
+
     // Print initial progress box
     let box_width = 22; // Width for "[██████████] 10/10" + padding
     let horizontal_line = "─".repeat(box_width - 2);
-    
-    // The initial position where we print the box
-    let initial_position = scroll_region_bottom;
-    
+
+    // The initial position where we print the TOP of the box
+    // We need to ensure the entire 3-line box fits within the scroll region
+    // Box takes lines: top, middle (progress), bottom
+    let initial_box_top = scroll_region_bottom - 3; // Start 3 lines up so bottom border is at scroll_region_bottom - 1
+
     {
         let mut out_guard = out.lock().unwrap();
         queue!(
             out_guard,
-            MoveTo(0, initial_position as u16),
+            MoveTo(0, initial_box_top as u16),
             Print(format!("╭{}╮\r\n", horizontal_line)),
             Print(format!("│ [█░░░░░░░░░] 1/10  │\r\n")),
             Print(format!("╰{}╯\r\n", horizontal_line))
         )?;
         out_guard.flush()?;
     }
-    
+
     // Track total lines scrolled - start with 0 since we'll receive the initial scroll event
     let mut lines_scrolled_total: usize = 0;
-    
+
     // Update progress from 2 to 10
     for progress in 2..=10 {
         // Sleep first to allow time for progress to be visible
         sleep(Duration::from_millis(500)).await;
-        
+
         // Check for any scroll events that occurred during sleep
         while let Ok(event) = scroll_rx.try_recv() {
             match event {
@@ -193,23 +193,25 @@ async fn run_tiktok_progress(
                 }
             }
         }
-        
+
         // Calculate where the progress box currently is
-        // The box was printed at initial_position and has scrolled up by lines_scrolled_total
-        let current_box_top = initial_position.saturating_sub(lines_scrolled_total);
+        // The box was printed at initial_box_top and has scrolled up by lines_scrolled_total
+        let current_box_top = initial_box_top.saturating_sub(lines_scrolled_total);
         let progress_line_position = current_box_top + 1; // Middle line of the 3-line box
-        
+
         let filled = "█".repeat(progress);
         let empty = "░".repeat(10 - progress);
         let progress_text = format!("[{}{}] {}/10", filled, empty, progress);
         let padded_text = format!("{:<18}", progress_text); // Left align with padding
-        
+
         {
             let mut out_guard = out.lock().unwrap();
-            
+
             // Only update if the progress line is still visible on screen
-            // Check if it's not above the top (0) or below the scroll region
-            if progress_line_position < scroll_region_bottom {
+            // The progress line must be:
+            // - Not above the top of the screen (>= 0, which is always true for usize)
+            // - Not below the bottom of the terminal (< rows)
+            if progress_line_position < rows {
                 queue!(
                     out_guard,
                     MoveTo(0, progress_line_position as u16),
@@ -219,7 +221,7 @@ async fn run_tiktok_progress(
             }
         }
     }
-    
+
     Ok(())
 }
 
@@ -276,17 +278,25 @@ async fn handle_enter_key(
     if submitted_text.trim() == "tiktok" {
         // Create a channel for scroll events
         let (scroll_tx, scroll_rx) = mpsc::channel::<ScrollEvent>(100);
-        
+
         // Store the sender in the state for future scroll events
         state.active_scroll_sender = Some(scroll_tx.clone());
-        
+
         // Spawn the tiktok progress animation as a background task
         let out_clone = out.clone();
         let required_lines_copy = state.required_lines;
         let cols_copy = state.cols;
         let rows_copy = state.rows;
         tokio::spawn(async move {
-            if let Err(e) = run_tiktok_progress(out_clone, cols_copy, rows_copy, required_lines_copy, scroll_rx).await {
+            if let Err(e) = run_tiktok_progress(
+                out_clone,
+                cols_copy,
+                rows_copy,
+                required_lines_copy,
+                scroll_rx,
+            )
+            .await
+            {
                 eprintln!("Error running tiktok progress: {}", e);
             }
             // Animation is complete, clear the scroll sender
@@ -298,19 +308,44 @@ async fn handle_enter_key(
         state.required_lines = calculate_required_lines("", state.cols);
         {
             let mut out_guard = out.lock().unwrap();
-            draw_frame(&mut out_guard, (state.cols, state.rows), state.required_lines)?;
-            draw_prompt_line(&mut out_guard, "", (state.cols, state.rows), state.required_lines)?;
+            draw_frame(
+                &mut out_guard,
+                (state.cols, state.rows),
+                state.required_lines,
+            )?;
+            draw_prompt_line(
+                &mut out_guard,
+                "",
+                (state.cols, state.rows),
+                state.required_lines,
+            )?;
         }
-        
+
         return Ok(());
     }
 
     // Now print the text at the bottom of the new scroll region
     let scroll_region_bottom = state.rows - state.required_lines - 1;
 
-    // Count how many lines the output will take (for scroll event)
-    let output_lines = submitted_text.lines().count().max(1);
-    
+    // Calculate how many terminal lines the output will actually take
+    // This needs to account for line wrapping
+    let mut total_terminal_lines = 0;
+    for line in submitted_text.lines() {
+        if line.is_empty() {
+            total_terminal_lines += 1;
+        } else {
+            // Calculate how many terminal lines this logical line will take due to wrapping
+            let line_length = line.len();
+            let terminal_width = state.cols;
+            let wrapped_lines = (line_length + terminal_width - 1) / terminal_width;
+            total_terminal_lines += wrapped_lines;
+        }
+    }
+    // If the text was empty or had no newlines, we still print at least one line
+    if total_terminal_lines == 0 {
+        total_terminal_lines = 1;
+    }
+
     // Replace all \n with \r\n to ensure cursor returns to column 0
     let output_text = submitted_text.replace('\n', "\r\n");
     {
@@ -326,14 +361,25 @@ async fn handle_enter_key(
         // Clear buffer and draw the new frame
         state.buffer.clear();
         state.required_lines = calculate_required_lines("", state.cols);
-        draw_frame(&mut out_guard, (state.cols, state.rows), state.required_lines)?;
-        draw_prompt_line(&mut out_guard, "", (state.cols, state.rows), state.required_lines)?;
+        draw_frame(
+            &mut out_guard,
+            (state.cols, state.rows),
+            state.required_lines,
+        )?;
+        draw_prompt_line(
+            &mut out_guard,
+            "",
+            (state.cols, state.rows),
+            state.required_lines,
+        )?;
     }
-    
+
     // Send scroll event if there's an active progress animation
     if let Some(sender) = &state.active_scroll_sender {
-        // The content scrolled up by the number of output lines
-        let _ = sender.send(ScrollEvent::ScrolledUp(output_lines)).await;
+        // The content scrolled up by the number of terminal lines (including wrapped lines)
+        let _ = sender
+            .send(ScrollEvent::ScrolledUp(total_terminal_lines))
+            .await;
     }
 
     Ok(())
@@ -349,11 +395,25 @@ fn update_frame_if_needed(
         state.required_lines = new_required_lines;
         set_scroll_region(state.rows, state.required_lines)?;
         let mut out_guard = out.lock().unwrap();
-        draw_frame(&mut out_guard, (state.cols, state.rows), state.required_lines)?;
-        draw_prompt_line(&mut out_guard, &state.buffer, (state.cols, state.rows), state.required_lines)?;
+        draw_frame(
+            &mut out_guard,
+            (state.cols, state.rows),
+            state.required_lines,
+        )?;
+        draw_prompt_line(
+            &mut out_guard,
+            &state.buffer,
+            (state.cols, state.rows),
+            state.required_lines,
+        )?;
     } else {
         let mut out_guard = out.lock().unwrap();
-        draw_prompt_line(&mut out_guard, &state.buffer, (state.cols, state.rows), state.required_lines)?;
+        draw_prompt_line(
+            &mut out_guard,
+            &state.buffer,
+            (state.cols, state.rows),
+            state.required_lines,
+        )?;
     }
     Ok(())
 }
@@ -369,11 +429,19 @@ fn handle_resize(
     print!("\x1B[r"); // clear any old region
     set_scroll_region(state.rows, state.required_lines)?;
     let mut out_guard = out.lock().unwrap();
-    draw_frame(&mut out_guard, (state.cols, state.rows), state.required_lines)?;
-    draw_prompt_line(&mut out_guard, &state.buffer, (state.cols, state.rows), state.required_lines)?;
+    draw_frame(
+        &mut out_guard,
+        (state.cols, state.rows),
+        state.required_lines,
+    )?;
+    draw_prompt_line(
+        &mut out_guard,
+        &state.buffer,
+        (state.cols, state.rows),
+        state.required_lines,
+    )?;
     Ok(())
 }
-
 
 /// Sets up a terminal scroll region to keep the input box fixed at the bottom.
 ///
