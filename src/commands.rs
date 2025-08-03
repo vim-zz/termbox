@@ -7,8 +7,8 @@ pub mod tiktok;
 /// Represents the result of a command execution
 #[derive(Debug)]
 pub enum CommandResult {
-    /// Command was handled successfully
-    Handled,
+    /// Command was handled successfully with optional output height
+    Handled { output_height: usize },
     /// Command was not recognized
     NotRecognized,
 }
@@ -46,7 +46,9 @@ impl Command {
         match self {
             Command::TikTok => {
                 tiktok::handle_tiktok_command(state, out).await?;
-                Ok(CommandResult::Handled)
+                Ok(CommandResult::Handled {
+                    output_height: tiktok::TIKTOK_ANIMATION_HEIGHT,
+                })
             }
         }
     }

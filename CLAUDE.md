@@ -22,6 +22,10 @@ cargo run --release
 # Run tests
 cargo test
 
+# Run specific test file
+cargo test input_tests
+cargo test output_tests
+
 # Check code with clippy
 cargo clippy
 
@@ -48,12 +52,21 @@ The application is structured as a Rust library (`src/lib.rs`) with the main app
 - `calculate_cursor_position()`: Calculates exact cursor placement for text input
 - `render_text_lines()`: Creates string representation for testing
 - Drawing functions: `draw_frame_to_buffer()`, `draw_prompt_line_to_buffer()` for terminal output
+- `ScrollEvent` enum and broadcast system for scroll events
+
+### Command System (`src/commands/`)
+- `commands.rs`: Command dispatcher using enum-based pattern with `CommandDispatcher`
+- `tiktok.rs`: Implementation of TikTok-style progress bar animation
+- Modular command architecture allows easy addition of new commands
+
+### UI Module (`src/ui.rs`)
+- Terminal UI utilities and frame drawing functions
 
 ### Main Application (`src/main.rs`) 
 - Async event loop using tokio and crossterm's EventStream
 - `push_content_up()`: Pushes existing terminal content up before drawing input frame
-- Progress animation functionality with tiktok-style progress bars
 - Terminal setup, cleanup, and scroll region management
+- Command processing integration
 
 ## Input Controls
 
@@ -61,6 +74,12 @@ The application is structured as a Rust library (`src/lib.rs`) with the main app
 - **Alt+Enter** or **Ctrl+J**: Insert a newline for multi-line input
 - **Backspace**: Delete the last character
 - **Esc**, **Ctrl+C**, or **Ctrl+D**: Exit the application
+
+## Commands
+
+The application includes a modular command system that recognizes special input:
+
+- **tiktok**: Displays an animated progress bar using full terminal width
 
 ## Testing
 

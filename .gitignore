@@ -3,3 +3,6 @@
 
 # Dont keep logs
 *.log
+
+# Dont keep secrets files
+.env

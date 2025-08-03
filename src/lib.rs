@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::{cursor::MoveTo, queue, style::Print};
 use std::io::Write;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 
 pub mod commands;
 pub mod ui;
@@ -34,7 +34,8 @@ pub struct InputState {
     pub cols: usize,
     pub rows: usize,
     pub required_lines: usize,
-    pub active_scroll_sender: Option<mpsc::Sender<ScrollEvent>>,
+    pub scroll_broadcast: Option<broadcast::Sender<ScrollEvent>>,
+    pub last_command_height: usize,
 }
 
 impl InputState {
@@ -45,7 +46,8 @@ impl InputState {
             cols,
             rows,
             required_lines,
-            active_scroll_sender: None,
+            scroll_broadcast: None,
+            last_command_height: 0,
         }
     }
 
@@ -113,8 +115,12 @@ impl InputState {
         }
     }
 
-    pub fn clear_scroll_sender(&mut self) {
-        self.active_scroll_sender = None;
+    pub fn setup_scroll_broadcast(&mut self) -> broadcast::Receiver<ScrollEvent> {
+        if self.scroll_broadcast.is_none() {
+            let (tx, _) = broadcast::channel(100);
+            self.scroll_broadcast = Some(tx);
+        }
+        self.scroll_broadcast.as_ref().unwrap().subscribe()
     }
 }
 

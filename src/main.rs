@@ -164,7 +164,10 @@ async fn handle_enter_key(
         .handle_command(&submitted_text, state, out.clone())
         .await?
     {
-        commands::CommandResult::Handled => return Ok(()),
+        commands::CommandResult::Handled { output_height } => {
+            state.last_command_height = output_height;
+            return Ok(());
+        }
         commands::CommandResult::NotRecognized => {
             // Continue with normal text processing
         }
@@ -192,10 +195,28 @@ async fn handle_enter_key(
         total_terminal_lines = 1;
     }
 
+    // Check if we need extra spacing based on last command's output height
+    let extra_spacing = if state.last_command_height > 1 {
+        // Add one extra newline for commands with vertical output
+        "\r\n"
+    } else {
+        ""
+    };
+
     // Replace all \n with \r\n to ensure cursor returns to column 0
     let output_text = submitted_text.replace('\n', "\r\n");
     {
         let mut out_guard = out.lock().unwrap();
+
+        // Print extra spacing first if there are active animations
+        if !extra_spacing.is_empty() {
+            queue!(
+                out_guard,
+                MoveTo(0, scroll_region_bottom as u16),
+                Print(&extra_spacing)
+            )?;
+        }
+
         queue!(
             out_guard,
             MoveTo(0, scroll_region_bottom as u16),
@@ -220,13 +241,17 @@ async fn handle_enter_key(
         )?;
     }
 
-    // Send scroll event if there's an active progress animation
-    if let Some(sender) = &state.active_scroll_sender {
+    // Send scroll event to all active progress animations
+    if let Some(broadcast_tx) = &state.scroll_broadcast {
         // The content scrolled up by the number of terminal lines (including wrapped lines)
-        let _ = sender
-            .send(ScrollEvent::ScrolledUp(total_terminal_lines))
-            .await;
+        // Plus any extra spacing we added
+        let extra_lines = if state.last_command_height > 1 { 1 } else { 0 };
+        let total_scroll = total_terminal_lines + extra_lines;
+        let _ = broadcast_tx.send(ScrollEvent::ScrolledUp(total_scroll));
     }
+
+    // Reset the command height after handling the spacing
+    state.last_command_height = 0;
 
     Ok(())
 }
