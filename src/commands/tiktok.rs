@@ -68,7 +68,7 @@ pub async fn handle_tiktok_command(
 /// # Arguments
 ///
 /// * `out` - Shared stdout handle
-/// * `_cols` - Terminal width in columns (unused but kept for API consistency)
+/// * `cols` - Terminal width in columns
 /// * `rows` - Terminal height in rows
 /// * `required_lines` - Number of lines used by the input frame
 /// * `scroll_rx` - Receiver for scroll events
@@ -78,15 +78,15 @@ pub async fn handle_tiktok_command(
 /// Returns `Ok(())` on success or an error if the operation fails.
 async fn run_tiktok_progress(
     out: Arc<Mutex<std::io::Stdout>>,
-    _cols: usize,
+    cols: usize,
     rows: usize,
     required_lines: usize,
     mut scroll_rx: mpsc::Receiver<ScrollEvent>,
 ) -> anyhow::Result<()> {
     let scroll_region_bottom = rows - required_lines - 1;
 
-    // Print initial progress box
-    let box_width = 22; // Width for "[██████████] 10/10" + padding
+    // Print initial progress box covering full terminal width
+    let box_width = cols;
     let horizontal_line = "─".repeat(box_width - 2);
 
     // The initial position where we print the TOP of the box
@@ -96,11 +96,16 @@ async fn run_tiktok_progress(
 
     {
         let mut out_guard = out.lock().unwrap();
+        // Initial progress (1/10)
+        let filled = "█".repeat(1);
+        let empty = "░".repeat(10 - 1);
+        let progress_text = format!("[{}{}] 1/10", filled, empty);
+        let padded_text = format!("{:<width$}", progress_text, width = box_width - 4);
         queue!(
             out_guard,
             MoveTo(0, initial_box_top as u16),
             Print(format!("╭{}╮\r\n", horizontal_line)),
-            Print(format!("│ [█░░░░░░░░░] 1/10  │\r\n")),
+            Print(format!("│ {} │\r\n", padded_text)),
             Print(format!("╰{}╯\r\n", horizontal_line))
         )?;
         out_guard.flush()?;
@@ -131,7 +136,7 @@ async fn run_tiktok_progress(
         let filled = "█".repeat(progress);
         let empty = "░".repeat(10 - progress);
         let progress_text = format!("[{}{}] {}/10", filled, empty, progress);
-        let padded_text = format!("{:<18}", progress_text); // Left align with padding
+        let padded_text = format!("{:<width$}", progress_text, width = box_width - 4); // Left align with padding to full width
 
         {
             let mut out_guard = out.lock().unwrap();
